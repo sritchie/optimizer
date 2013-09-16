@@ -1,14 +1,7 @@
 (ns optimizer.core
   (:refer-clojure :exclude (complement))
   (:use midje.sweet)
-  (:require [clojure.core.match :as m :refer (match)]
-            [clojure.math.combinatorics :as math]))
-
-;; Okay, let's get our grammar worked out. We're parsing expressions
-;; that look like:
-;;
-;; (and (or v0 v1) v2)
-
+  (:require [clojure.core.match :as m :refer (match)]))
 (def prefixes
   "The set of valid variable prefixes."
   #{\v \w})
@@ -97,7 +90,6 @@
   "Returns true if the supplied expression is a valid boolean
   expression, false otherwise."
   (some-fn conjunction? disjunction? negation?))
-
 (defn make-checker
   ([pred] (make-checker pred (fn [_] false)))
   ([pred else]
@@ -119,7 +111,6 @@
   "Returns true if the supplied expression contains only cheap
   variables, false otherwise."
   (make-checker cheap?))
-
 (let [mixed-exp '(and (or w1 v1) v2)]
   (fact
     (conjunction (disjunction (expensive 1)
@@ -129,10 +120,6 @@
   (fact
     mixed-exp =not=> fully-cheap?
     mixed-exp => valid?))
-
-;; Great, so now we have this form validator and some ways to build
-;; and deconstruct algebraic expressions.
-
 (defn fixed-point [f guess]
   (let [next (f guess)]
     (if (= guess next)
@@ -161,19 +148,6 @@
 (defn complement-law [x y]
   (and (negation? x)
        (eq (complement x) y)))
-
-;; There are a few laws we ALWAYS want to apply.
-;;
-;; * Involution Law: (not (not a)) == a
-;;
-;; * Identity Laws: (and a F) == F, (and a T) == a, (or a F) == a,
-;;   (or a T) == T
-;;
-;; * Idempotent Laws: (or a a) == a, (and a a) == a
-;;
-;; * Complement Laws: (and a (not a)) == F, (or a (not a)) == T, (not
-;;F) == T, (not T) == F
-
 (defmacro expmatch [v & forms]
   `(let [v# ~v]
      (if-not (expression? v#)
@@ -218,7 +192,6 @@
                       ['not x] (negation (simplify x))
                       :else e))]
     (fixed-point bool-reduce exp)))
-
 (let [example-expression '(or (and (and v1 (or v2 v3)) (not w1)) F)]
   (fact
     "Reduce away the or F:"
@@ -232,10 +205,6 @@
 
     "(or a a) => a"
     (simplify '(and (or w1 w1) v2)) => '(and w1 v2)))
-
-;; The next laws serve to give me different permutations on the
-;; original input expression.
-
 (defmacro matcher [& pairs]
   `(fn [exp#]
      (if-not (expression? exp#)
@@ -306,48 +275,3 @@
    ['or a (([_ b c] :seq) :guard conjunction?)]
    [(conjunction (disjunction a b)
                  (disjunction a c))]))
-
-
-
-(comment
-  (let [cake (matcher ['and
-                       (([_ a b] :seq) :guard disjunction?)
-                       (([_ c d] :seq) :guard disjunction?)]
-                      [(disjunction a (conjunction b d))])]
-    (cake '(and (or 1 2) (or 1 3))))
-
-  (fact
-    "DeMorgan's laws:"
-    (expand '(not v1)) => ['(not v1)])
-
-  (defn commutative-expand [exp]
-    (if-not (expression? exp)
-      [exp]
-      (match (vec exp)
-             ['not a] (map negation (expand a))
-             [(:or 'and 'or) ls rs]
-             (let [f (func exp)]
-               (apply concat
-                      (for [l (expand ls)
-                            r (expand rs)]
-                        [(list f l r) (list f r l)]))))))
-
-  (defn win? [exp]
-    (or (cheap? exp)
-        (and (expression? exp))
-        (match (vec exp)
-               ['and l r] (map negation (expand a))
-               [(:or 'and 'or) ls rs]
-               :else false))))
-
-(defn print-all [xs]
-  (doseq [x xs] (println x)))
-
-(tabular
- (fact
-   (?op ?x) => [?y]
-   (?op ?y) => [?x])
- ?op      ?x                 ?y
- ;; DeMorgan's Laws
- demorgan '(not (and v1 v2)) '(and (not v1) (not v2))
- demorgan '(not (or v1 v2))  '(or (not v1) (not v2)))

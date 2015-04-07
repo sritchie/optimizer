@@ -1,7 +1,7 @@
 (ns optimizer.core
-  (:refer-clojure :exclude (complement))
-  (:use midje.sweet)
-  (:require [clojure.core.match :as m :refer (match)]))
+  (:require [clojure.core.match :refer [match]]
+            [clojure.set :refer [subset? difference]]))
+
 (def prefixes
   "The set of valid variable prefixes."
   #{\v \w})
@@ -18,12 +18,6 @@
 (defn variable? [x]
   (and (symbol? x)
        (contains? prefixes (prefix x))))
-
-(defn cheap? [x]
-  (and (variable? x) (= \v (prefix x))))
-
-(defn expensive? [x]
-  (and (variable? x) (= \w (prefix x))))
 
 ;; Variable Creation
 
@@ -43,235 +37,266 @@
   (and (coll? exp)
        (= 3 (count exp))))
 
-(defn func
+(def func
   "Returns the function of the supplied boolean expression."
-  [exp] (first exp))
+  first)
 
-(defn arguments
+(def args
   "Returns the arguments of the supplied boolean expression."
-  [exp] (rest exp))
+  rest)
 
-(defn conjunction?
+(defn AND?
   "Returns true if the supplied expression is of the form
   (and <variable> <variable>), false otherwise."
   [exp]
   (and (binary? exp)
        (= 'and (func exp))))
 
-(defn conjunction [a b] (list 'and a b))
+(defn AND [a b] (list 'and a b))
 
-(defn disjunction?
+(defn OR?
   "Returns true if the supplied expression is of the form
   (or <variable> <variable>), false otherwise."
   [exp]
   (and (binary? exp)
        (= 'or (func exp))))
 
-(defn disjunction [a b] (list 'or a b))
+(defn OR [a b] (list 'or a b))
 
-(defn negation?
+(defn NOT?
   "Returns true if the supplied expression is of the form
   (not <variable>), false otherwise."
   [exp]
   (and (unary? exp)
        (= 'not (func exp))))
 
-(defn negation [x] (list 'not x))
-
-(defn complement
+(defn NOT
   "If x is a negation, returns its argument, else returns the negation
   of x."
   [x]
-  (if (negation? x)
-    (first (arguments x))
-    (negation x)))
+  (if (NOT? x)
+    (first (args x))
+    (list 'not x)))
 
-(def expression?
+(def expr?
   "Returns true if the supplied expression is a valid boolean
   expression, false otherwise."
-  (some-fn conjunction? disjunction? negation?))
+  (some-fn AND? OR? NOT?))
+
+;; ## Deep Checking
+
 (defn make-checker
+  "Takes a predicate that checks the leaves."
   ([pred] (make-checker pred (fn [_] false)))
   ([pred else]
-     (fn recurse [exp]
-       (boolean
-        (cond (or (pred exp) (literal? exp)) true
-              (expression? exp) (every? recurse (arguments exp))
-              :else (else exp))))))
+   (fn recurse [exp]
+     (boolean
+      (cond (or (pred exp) (literal? exp)) true
+            (expr? exp) (every? recurse (args exp))
+            :else (else exp))))))
 
-(def valid?
-  "Returns true if the supplied expression is a valid boolean
-  expression, false otherwise. The test is applie recursively down to
-  all subforms."
-  (make-checker
-   variable?
-   #(println "Subexpression is invalid: " %)))
-
-(def fully-cheap?
+(def cheap?
   "Returns true if the supplied expression contains only cheap
   variables, false otherwise."
-  (make-checker cheap?))
-(let [mixed-exp '(and (or w1 v1) v2)]
-  (fact
-    (conjunction (disjunction (expensive 1)
-                              (cheap 1))
-                 (cheap 2))
-    => mixed-exp)
-  (fact
-    mixed-exp =not=> fully-cheap?
-    mixed-exp => valid?))
-(defn fixed-point [f guess]
-  (let [next (f guess)]
-    (if (= guess next)
-      next
-      (fixed-point f next))))
+  (make-checker
+   (fn [x]
+     (if (variable? x)
+       (= \v (prefix x))))))
 
-(defn eq
-  "Equality for boolean expressions."
-  [x y]
-  (if (and (expression? x) (expression? y))
-    (and (= (func x) (func y))
-         (let [[lx ly] (arguments x)
-               [rx ry] (arguments y)]
-           (or (and (eq lx rx) (eq ly ry))
-               (and (eq lx ry) (eq ly rx)))))
-    (= x y)))
+(def expensive?
+  "Returns true if the supplied expression is fully expensive, false
+  otherwise."
+  (complement cheap?))
 
-(defn switch-or
-  "returns true if the supplied binary pred returns true when passed x
-  and y in either order."
-  [pred x y]
-  (boolean
-   (or (pred x y)
-       (pred y x))))
+;; ## Binary Simplification
 
-(defn complement-law [x y]
-  (and (negation? x)
-       (eq (complement x) y)))
-(defmacro expmatch [v & forms]
-  `(let [v# ~v]
-     (if-not (expression? v#)
-       v#
-       (match (vec v#) ~@forms))))
+(defn flatten-binary
+  "Returns a function that takes a binary expression and flattens it
+  down into a variadic version. Returns the arguments to the variadic
+  version.
 
-(defn simplify [exp]
-  (letfn [(bool-reduce [e]
-            (expmatch e
-                      ;; Identity Laws
-                      ['and x 'F] 'F
-                      ['and 'F x] 'F
-                      ['or x 'T] 'T
-                      ['or 'T x] 'T
-                      ['not 'T] 'F
-                      ['not 'F] 'T
-                      ['and x 'T] x
-                      ['and 'T x] x
-                      ['or x 'F] x
-                      ['or 'F x] x
-                      ;; DeMorgan's Laws (unwrapping)
-                      [(:or 'and 'or) (l :guard negation?) (r :guard negation?)]
-                      (let [f (if (= (func e) 'and)
-                                conjunction
-                                disjunction)]
-                        (negation
-                         (f (complement l)
-                            (complement r))))
-                      [(:or 'and 'or) x y]
-                      (let [f (func e)
-                            x (simplify x)
-                            y (simplify y)]
-                        (cond (eq x y) x ;; Idempotent Laws
-                              ;; Complement Laws
-                              (switch-or complement-law x y)
-                              (if (conjunction? e) 'F 'T)
-                              ;; Else, sub in new, reduced arguments
-                              :else (list f x y)))
+  If the initial expression doesn't pass the checker, returns a
+  singleton list with only that element."
+  [pred]
+  (fn flatten* [e]
+    (if-not (pred e)
+      [e]
+      (mapcat (fn [x]
+                (if (pred x)
+                  (flatten* x)
+                  [x]))
+              (rest e)))))
 
-                      ;; Involution Law
-                      ['not (x :guard negation?)] (complement x)
-                      ['not x] (negation (simplify x))
-                      :else e))]
-    (fixed-point bool-reduce exp)))
-(let [example-expression '(or (and (and v1 (or v2 v3)) (not w1)) F)]
-  (fact
-    "Reduce away the or F:"
-    (simplify example-expression) => '(and (and v1 (or v2 v3)) (not w1))
+(def flatten-and (flatten-binary AND?))
+(def flatten-or (flatten-binary OR?))
 
-    "and F == F"
-    (simplify '(and (and (and v1 (or v2 v3)) (not w1)) F)) => 'F
+(defn op->binary
+  "Moves the `op` instances back into binary form. If no ops are
+  provided, returns 'T."
+  [op]
+  (fn [[x & xs]]
+    (reduce op (or x 'T) xs)))
 
-    "No reduction..."
-    (simplify '(and (or w1 v1) v2)) => '(and (or w1 v1) v2)
+(def and->binary (op->binary AND))
+(def or->binary (op->binary OR))
 
-    "(or a a) => a"
-    (simplify '(and (or w1 w1) v2)) => '(and w1 v2)))
-(defmacro matcher [& pairs]
-  `(fn [exp#]
-     (if-not (expression? exp#)
-       []
-       (match (vec exp#)
-              ~@pairs
-              :else []))))
+(defn combinations
+  "Thanks to amalloy: https://gist.github.com/amalloy/1042047"
+  [n coll]
+  (if (= 1 n)
+    (map list coll)
+    (lazy-seq
+     (when-let [[head & tail] (seq coll)]
+       (concat (for [x (combinations (dec n) tail)]
+                 (cons head x))
+               (combinations n tail))))))
 
-(def demorgan
-  (matcher
-   ;; DeMorgan's Laws (conjunctions)
-   ['not (([_ l r] :seq) :guard conjunction?)]
-   [(conjunction (negation l)
-                 (negation r))]
+(defn absorption-law
+  "let lawHandled = case `flatten-fn` of
+   `flatten-or`  -> p AND (p OR q) == p
+   `flatten-and` -> p OR (p AND q) == p
 
-   ['and (l :guard negation?) (r :guard negation?)]
-   [(negation
-     (conjunction (complement l)
-                  (complement r)))]
+  Absorption law, from: http://www.nayuki.io/page/boolean-algebra-laws
 
-   ;; DeMorgan's Laws (disjunctions)
-   ['not (([_ l r] :seq) :guard disjunction?)]
-   [(disjunction (negation l)
-                 (negation r))]
+  The input exprs must all be conjunctions if you pass `flatten-or`
+  and all disjunctions if you pass `flatten-and`.
 
-   ['or (l :guard negation?) (r :guard negation?)]
-   [(negation
-     (disjunction (complement l)
-                  (complement r)))]))
+  Returns a sequence of simplified conjunctions (or disjunctions)."
+  [flatten-fn exprs]
+  (let [exprs (set exprs)
+        args* (comp set flatten-fn)]
+    (->> (for [[l r] (combinations 2 exprs)
+               :let [ls (args* l)
+                     rs (args* r)]]
+           (cond (subset? ls rs) #{r}
+                 (subset? rs ls) #{l}
+                 :else #{}))
+         (reduce into #{})
+         (difference exprs)
+         (seq))))
 
-(def associative
-  (matcher
-   ;; Associative Laws (conjunctions)
-   ['and (([_ a b] :seq) :guard conjunction?) c]
-   [(conjunction a (conjunction b c))]
+(defn simplify-binary
+  "Returns a function that simplifies binary expressions.
 
-   ['and a (([_ b c] :seq) :guard conjunction?)]
-   [(conjunction (conjunction a b) c)]
+  Rules handled:
 
-   ;; Associative Laws (disjunctions)
-   ['or (([_ a b] :seq) :guard disjunction?) c]
-   [(disjunction a (disjunction b c))]
+  Annihilator: (p OR T) = T, (p AND F) = F
+  Identity:    (p AND T) = p, (p OR F) = p
+  Idempotence: (p AND p) = (p OR p) = p (accumulating into a set)
+  Complement:  (p AND (NOT p)) = F, (p OR (NOT p)) = T
 
-   ['or a (([_ b c] :seq) :guard disjunction?)]
-   [(disjunction (disjunction a b) c)]))
+  The flattening implementation depends on associativity and
+  commutativity."
+  [{:keys [ctor annihilator id flatten-fn tear-fn]}]
+  (let [zip-fn (op->binary ctor)]
+    (fn attack
+      ([l r] (attack (flatten-fn (ctor l r))))
+      ([xs]
+       (letfn [(absorb [acc p]
+                 (cond (= p id) acc
+                       (or (= p annihilator)
+                           (acc (NOT p)))
+                       (reduced [annihilator])
+                       :else (conj acc p)))]
+         (->> (reduce absorb #{} xs)
+              (absorption-law tear-fn)
+              (zip-fn)))))))
 
-(def distributive
-  (matcher
-   ;; Distributive Laws
-   ['and
-    (([_ a b] :seq) :guard disjunction?)
-    (([_ c d] :seq) :guard disjunction?)]
-   (if (= a c)
-     [(disjunction a (conjunction b d))]
-     [])
+(def simplify-and
+  "Returns a function that simplifies an AND expression. Returns an
+  expression in conjunctive normal form."
+  (simplify-binary
+   {:ctor AND
+    :annihilator 'F
+    :id 'T
+    :flatten-fn flatten-and
+    :tear-fn flatten-or}))
 
-   ['and a (([_ b c] :seq) :guard disjunction?)]
-   [(disjunction (conjunction a b)
-                 (conjunction a c))]
+(def simplify-or*
+  "Returns a function that simplifies an OR expression."
+  (simplify-binary
+   {:ctor OR
+    :id 'F
+    :annihilator 'T
+    :flatten-fn flatten-or
+    :tear-fn flatten-and}))
 
-   ['or
-    (([_ a b] :seq) :guard conjunction?)
-    (([_ c d] :seq) :guard conjunction?)]
-   (if (eq a c)
-     [(conjunction a (disjunction b d))]
-     [])
+(defn simplify-or
+  "Applies the distributive law to convert the OR into CNF, then
+  applies the AND simplifications."
+  [l r]
+  (simplify-and
+   (for [l (flatten-and l)
+         r (flatten-and r)]
+     (simplify-or* l r))))
 
-   ['or a (([_ b c] :seq) :guard conjunction?)]
-   [(conjunction (disjunction a b)
-                 (disjunction a c))]))
+;; Note: The basic algorithm is here:
+;; http://www.cs.jhu.edu/~jason/tutorials/convert-to-CNF.html
+;;
+;; NOTE: We still have a couple of simplifications we could implement
+;; from here: http://www.nayuki.io/page/boolean-algebra-laws no name
+;; and consensus.
+
+(defn simplify
+  "returns a simplified expression in conjunctive normal
+  form."
+  [exp]
+  (match (if (expr? exp) (vec exp) exp)
+         ;; AND and OR simplification
+         ['and p q] (simplify-and (simplify p) (simplify q))
+         ['or  p q] (simplify-or  (simplify p) (simplify q))
+
+         ;; NOT simplification:
+         ['not 'T] 'F
+         ['not 'F] 'T
+
+         ;; (NOT (NOT p)) => p (involution law)
+         ['not (['not p] :seq)] (simplify p)
+
+         ;; DeMorgan's Laws
+         ['not (['and p q] :seq)] (simplify (OR (NOT p) (NOT q)))
+         ['not (['or p q] :seq)] (simplify (AND (NOT p) (NOT q)))
+         ['not x] (NOT (simplify x))
+
+         ;; Returns constants and literals.
+         :else exp))
+
+(def separate (juxt filter remove))
+
+(defn factor
+  "Reverse of the distributive property:
+
+  (and (p or q) (p or z)) = (p or (and q z))"
+  [cnf-exp]
+  (letfn [(max-factor [ors]
+            (->> (apply concat ors)
+                 (frequencies)
+                 (sort-by (comp - val))
+                 (first)))
+          (factor* [clauses]
+            (let [flat-clauses (map flatten-or clauses)
+                  [shared-exp n] (max-factor flat-clauses)]
+              (and->binary
+               (if (= n 1)
+                 clauses
+                 (let [factorable? (partial some #{shared-exp})
+                       [haves have-nots] (separate factorable? flat-clauses)
+                       conjuncts (for [clause haves :when (not= clause [shared-exp])]
+                                   (or->binary (remove #{shared-exp} clause)))]
+                   ;; If you can't pull the shared expression out of 2
+                   ;; or more subexpressions, abort.
+                   (if (< (count conjuncts) 2)
+                     clauses
+                     (let [factored (OR shared-exp (factor* conjuncts))]
+                       (if-let [remaining (not-empty (map or->binary have-nots))]
+                         [(factor* remaining) factored]
+                         [factored]))))))))]
+    (factor*
+     (flatten-and cnf-exp))))
+
+(defn pushdown-only [exp]
+  (and->binary
+   (filter cheap? (flatten-and (simplify exp)))))
+
+(def pushdown
+  (comp factor pushdown-only))

@@ -54,11 +54,6 @@
 
 ;; Generators
 
-(def compound
-  (fn [inner-gen]
-    (gen/one-of [(gen/list inner-gen)
-                 (gen/map inner-gen inner-gen)])))
-
 (def cheap-v (gen/fmap cheap gen/nat))
 (def expensive-v (gen/fmap expensive gen/nat))
 (def variable (gen/one-of [cheap-v expensive-v]))
@@ -155,7 +150,7 @@
   (if (empty? colls)
     '(())
     (for [x (first colls)
-          more (cart (rest colls))]
+          more (cartesian-prod (rest colls))]
       (cons x more))))
 
 (defn variable-map

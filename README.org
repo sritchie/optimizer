@@ -62,25 +62,25 @@ All other things being equal, smaller pre-filters (measured by tree size of the 
 Project file:
 
 #+BEGIN_SRC clojure :tangle ./project.clj
-(defproject optimizer "0.1.0-SNAPSHOT"
-  :description "FIXME: write description"
-  :url "http://example.com/FIXME"
-  :license {:name "Eclipse Public License"
-            :url "http://www.eclipse.org/legal/epl-v10.html"}
-  :dependencies [[org.clojure/clojure "1.5.1"]
-                 [org.clojure/core.match "0.2.0-rc5"]]
-  :profiles {:dev {:resource-paths ["dev"]
-                   :dependencies [[midje "1.5.1"]]
-                   :plugins [[lein-midje "3.0.0"]]}})
+  (defproject io.samritchie/optimizer "0.1.0-SNAPSHOT"
+    :description "Boolean Optimizer in Clojure."
+    :url "https://github.com/sritchie/optimizer"
+    :license {:name "Eclipse Public License"
+              :url "http://www.eclipse.org/legal/epl-v10.html"}
+    :dependencies [[org.clojure/core.match "0.3.0-alpha4"]]
+    :profiles {:provided
+               {:dependencies [[org.clojure/clojure "1.6.0"]]}
+               :dev
+               {:resource-paths ["dev"]
+                :dependencies [[org.clojure/test.check "0.7.0"]]}})
 #+END_SRC
 
-Namespace declaration, pulling in =core.match= and =midje= for inline tests.
+Namespace declaration, pulling in =core.match=.
 
 #+BEGIN_SRC clojure :tangle src/optimizer/core.clj
   (ns optimizer.core
-    (:refer-clojure :exclude (complement))
-    (:use midje.sweet)
-    (:require [clojure.core.match :as m :refer (match)]))
+    (:require [clojure.core.match :refer [match]]
+              [clojure.set :refer [subset? difference]]))
 #+END_SRC
 
  Okay, let's get our grammar worked out. We're parsing expressions that look like standard lisp forms: ~(and (or v0 v1) v2)~, so the reader itself will do for a parser.
@@ -103,12 +103,6 @@ Namespace declaration, pulling in =core.match= and =midje= for inline tests.
     (and (symbol? x)
          (contains? prefixes (prefix x))))
 
-  (defn cheap? [x]
-    (and (variable? x) (= \v (prefix x))))
-
-  (defn expensive? [x]
-    (and (variable? x) (= \w (prefix x))))
-
   ;; Variable Creation
 
   (defn cheap [n]
@@ -127,132 +121,269 @@ Namespace declaration, pulling in =core.match= and =midje= for inline tests.
     (and (coll? exp)
          (= 3 (count exp))))
 
-  (defn func
+  (def func
     "Returns the function of the supplied boolean expression."
-    [exp] (first exp))
+    first)
 
-  (defn arguments
+  (def args
     "Returns the arguments of the supplied boolean expression."
-    [exp] (rest exp))
+    rest)
 
-  (defn conjunction?
+  (defn AND?
     "Returns true if the supplied expression is of the form
     (and <variable> <variable>), false otherwise."
     [exp]
     (and (binary? exp)
          (= 'and (func exp))))
 
-  (defn conjunction [a b] (list 'and a b))
+  (defn AND [a b] (list 'and a b))
 
-  (defn disjunction?
+  (defn OR?
     "Returns true if the supplied expression is of the form
     (or <variable> <variable>), false otherwise."
     [exp]
     (and (binary? exp)
          (= 'or (func exp))))
 
-  (defn disjunction [a b] (list 'or a b))
+  (defn OR [a b] (list 'or a b))
 
-  (defn negation?
+  (defn NOT?
     "Returns true if the supplied expression is of the form
     (not <variable>), false otherwise."
     [exp]
     (and (unary? exp)
          (= 'not (func exp))))
 
-  (defn negation [x] (list 'not x))
-
-  (defn complement
+  (defn NOT
     "If x is a negation, returns its argument, else returns the negation
     of x."
     [x]
-    (if (negation? x)
-      (first (arguments x))
-      (negation x)))
+    (if (NOT? x)
+      (first (args x))
+      (list 'not x)))
 
-  (def expression?
+  (def expr?
     "Returns true if the supplied expression is a valid boolean
     expression, false otherwise."
-    (some-fn conjunction? disjunction? negation?))
+    (some-fn AND? OR? NOT?))
 
-#+END_SRC
-
-Next, I built a couple of checkers. =valid?= checks that the tree is a valid expression in our grammar. =fully-cheap?= checks that some subtree contains only valid subexpressions, literals and cheap variables.
-
-#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
+  ;; ## Deep Checking
 
   (defn make-checker
+    "Takes a predicate that checks the leaves."
     ([pred] (make-checker pred (fn [_] false)))
     ([pred else]
-       (fn recurse [exp]
-         (boolean
-          (cond (or (pred exp) (literal? exp)) true
-                (expression? exp) (every? recurse (arguments exp))
-                :else (else exp))))))
+     (fn recurse [exp]
+       (boolean
+        (cond (or (pred exp) (literal? exp)) true
+              (expr? exp) (every? recurse (args exp))
+              :else (else exp))))))
 
-  (def valid?
-    "Returns true if the supplied expression is a valid boolean
-    expression, false otherwise. The test is applie recursively down to
-    all subforms."
-    (make-checker
-     variable?
-     #(println "Subexpression is invalid: " %)))
-
-  (def fully-cheap?
+  (def cheap?
     "Returns true if the supplied expression contains only cheap
     variables, false otherwise."
-    (make-checker cheap?))
+    (make-checker
+     (fn [x]
+       (if (variable? x)
+         (= \v (prefix x))))))
 
+  (def expensive?
+    "Returns true if the supplied expression is fully expensive, false
+    otherwise."
+    (complement cheap?))
 
+  ;; ## Binary Simplification
 
-#+END_SRC
+  (defn flatten-binary
+    "Returns a function that takes a binary expression and flattens it
+    down into a variadic version. Returns the arguments to the variadic
+    version.
 
-And a short test to that effect:
+    If the initial expression doesn't pass the checker, returns a
+    singleton list with only that element."
+    [pred]
+    (fn flatten* [e]
+      (if-not (pred e)
+        [e]
+        (mapcat (fn [x]
+                  (if (pred x)
+                    (flatten* x)
+                    [x]))
+                (rest e)))))
 
-#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
-  (let [mixed-exp '(and (or w1 v1) v2)]
-    (fact
-      (conjunction (disjunction (expensive 1)
-                                (cheap 1))
-                   (cheap 2))
-      => mixed-exp)
-    (fact
-      mixed-exp =not=> fully-cheap?
-      mixed-exp => valid?))
-#+END_SRC
+  (def flatten-and (flatten-binary AND?))
+  (def flatten-or (flatten-binary OR?))
 
-Great, so now we have this form validator and some ways to build and deconstruct algebraic expressions. Next, I implemented an equality function that compares two boolean expressions, keeping the commutative law in mind.
+  (defn op->binary
+    "Moves the `op` instances back into binary form. If no ops are
+    provided, returns 'T."
+    [op]
+    (fn [[x & xs]]
+      (reduce op (or x 'T) xs)))
 
-#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
-  (defn fixed-point [f guess]
-    (let [next (f guess)]
-      (if (= guess next)
-        next
-        (fixed-point f next))))
+  (def and->binary (op->binary AND))
+  (def or->binary (op->binary OR))
 
-  (defn eq
-    "Equality for boolean expressions."
-    [x y]
-    (if (and (expression? x) (expression? y))
-      (and (= (func x) (func y))
-           (let [[lx ly] (arguments x)
-                 [rx ry] (arguments y)]
-             (or (and (eq lx rx) (eq ly ry))
-                 (and (eq lx ry) (eq ly rx)))))
-      (= x y)))
+  (defn combinations
+    "Thanks to amalloy: https://gist.github.com/amalloy/1042047"
+    [n coll]
+    (if (= 1 n)
+      (map list coll)
+      (lazy-seq
+       (when-let [[head & tail] (seq coll)]
+         (concat (for [x (combinations (dec n) tail)]
+                   (cons head x))
+                 (combinations n tail))))))
 
-  (defn switch-or
-    "returns true if the supplied binary pred returns true when passed x
-    and y in either order."
-    [pred x y]
-    (boolean
-     (or (pred x y)
-         (pred y x))))
+  (defn absorption-law
+    "let lawHandled = case `flatten-fn` of
+     `flatten-or`  -> p AND (p OR q) == p
+     `flatten-and` -> p OR (p AND q) == p
 
-  (defn complement-law [x y]
-    (and (negation? x)
-         (eq (complement x) y)))
+    Absorption law, from: http://www.nayuki.io/page/boolean-algebra-laws
 
+    The input exprs must all be conjunctions if you pass `flatten-or`
+    and all disjunctions if you pass `flatten-and`.
+
+    Returns a sequence of simplified conjunctions (or disjunctions)."
+    [flatten-fn exprs]
+    (let [exprs (set exprs)
+          args* (comp set flatten-fn)]
+      (->> (for [[l r] (combinations 2 exprs)
+                 :let [ls (args* l)
+                       rs (args* r)]]
+             (cond (subset? ls rs) #{r}
+                   (subset? rs ls) #{l}
+                   :else #{}))
+           (reduce into #{})
+           (difference exprs)
+           (seq))))
+
+  (defn simplify-binary
+    "Returns a function that simplifies binary expressions.
+
+    Rules handled:
+
+    Annihilator: (p OR T) = T, (p AND F) = F
+    Identity:    (p AND T) = p, (p OR F) = p
+    Idempotence: (p AND p) = (p OR p) = p (accumulating into a set)
+    Complement:  (p AND (NOT p)) = F, (p OR (NOT p)) = T
+
+    The flattening implementation depends on associativity and
+    commutativity."
+    [{:keys [ctor annihilator id flatten-fn tear-fn]}]
+    (let [zip-fn (op->binary ctor)]
+      (fn attack
+        ([l r] (attack (flatten-fn (ctor l r))))
+        ([xs]
+         (letfn [(absorb [acc p]
+                   (cond (= p id) acc
+                         (or (= p annihilator)
+                             (acc (NOT p)))
+                         (reduced [annihilator])
+                         :else (conj acc p)))]
+           (->> (reduce absorb #{} xs)
+                (absorption-law tear-fn)
+                (zip-fn)))))))
+
+  (def simplify-and
+    "Returns a function that simplifies an AND expression. Returns an
+    expression in conjunctive normal form."
+    (simplify-binary
+     {:ctor AND
+      :annihilator 'F
+      :id 'T
+      :flatten-fn flatten-and
+      :tear-fn flatten-or}))
+
+  (def simplify-or*
+    "Returns a function that simplifies an OR expression."
+    (simplify-binary
+     {:ctor OR
+      :id 'F
+      :annihilator 'T
+      :flatten-fn flatten-or
+      :tear-fn flatten-and}))
+
+  (defn simplify-or
+    "Applies the distributive law to convert the OR into CNF, then
+    applies the AND simplifications."
+    [l r]
+    (simplify-and
+     (for [l (flatten-and l)
+           r (flatten-and r)]
+       (simplify-or* l r))))
+
+  ;; Note: The basic algorithm is here:
+  ;; http://www.cs.jhu.edu/~jason/tutorials/convert-to-CNF.html
+  ;;
+  ;; NOTE: We still have a couple of simplifications we could implement
+  ;; from here: http://www.nayuki.io/page/boolean-algebra-laws no name
+  ;; and consensus.
+
+  (defn simplify
+    "returns a simplified expression in conjunctive normal
+    form."
+    [exp]
+    (match (if (expr? exp) (vec exp) exp)
+           ;; AND and OR simplification
+           ['and p q] (simplify-and (simplify p) (simplify q))
+           ['or  p q] (simplify-or  (simplify p) (simplify q))
+
+           ;; NOT simplification:
+           ['not 'T] 'F
+           ['not 'F] 'T
+
+           ;; (NOT (NOT p)) => p (involution law)
+           ['not (['not p] :seq)] (simplify p)
+
+           ;; DeMorgan's Laws
+           ['not (['and p q] :seq)] (simplify (OR (NOT p) (NOT q)))
+           ['not (['or p q] :seq)] (simplify (AND (NOT p) (NOT q)))
+           ['not x] (NOT (simplify x))
+
+           ;; Returns constants and literals.
+           :else exp))
+
+  (def separate (juxt filter remove))
+
+  (defn factor
+    "Reverse of the distributive property:
+
+    (and (p or q) (p or z)) = (p or (and q z))"
+    [cnf-exp]
+    (letfn [(max-factor [ors]
+              (->> (apply concat ors)
+                   (frequencies)
+                   (sort-by (comp - val))
+                   (first)))
+            (factor* [clauses]
+              (let [flat-clauses (map flatten-or clauses)
+                    [shared-exp n] (max-factor flat-clauses)]
+                (and->binary
+                 (if (= n 1)
+                   clauses
+                   (let [factorable? (partial some #{shared-exp})
+                         [haves have-nots] (separate factorable? flat-clauses)
+                         conjuncts (for [clause haves :when (not= clause [shared-exp])]
+                                     (or->binary (remove #{shared-exp} clause)))]
+                     ;; If you can't pull the shared expression out of 2
+                     ;; or more subexpressions, abort.
+                     (if (< (count conjuncts) 2)
+                       clauses
+                       (let [factored (OR shared-exp (factor* conjuncts))]
+                         (if-let [remaining (not-empty (map or->binary have-nots))]
+                           [(factor* remaining) factored]
+                           [factored]))))))))]
+      (factor*
+       (flatten-and cnf-exp))))
+
+  (defn pushdown-only [exp]
+    (and->binary
+     (filter cheap? (flatten-and (simplify exp)))))
+
+  (def pushdown
+    (comp factor pushdown-only))
 #+END_SRC
 
 There are a few laws we can always apply that will lead to reductions.
@@ -264,67 +395,290 @@ There are a few laws we can always apply that will lead to reductions.
 
 I've also got one direction of DeMorgan's law in there.
 
-#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
-  (defmacro expmatch [v & forms]
-    `(let [v# ~v]
-       (if-not (expression? v#)
-         v#
-         (match (vec v#) ~@forms))))
+Now let's get to the tests!
 
-  (defn simplify [exp]
-    (letfn [(bool-reduce [e]
-              (expmatch e
-                        ;; Identity Laws
-                        ['and x 'F] 'F
-                        ['and 'F x] 'F
-                        ['or x 'T] 'T
-                        ['or 'T x] 'T
-                        ['not 'T] 'F
-                        ['not 'F] 'T
-                        ['and x 'T] x
-                        ['and 'T x] x
-                        ['or x 'F] x
-                        ['or 'F x] x
-                        ;; DeMorgan's Laws (unwrapping)
-                        [(:or 'and 'or) (l :guard negation?) (r :guard negation?)]
-                        (let [f (if (= (func e) 'and)
-                                  conjunction
-                                  disjunction)]
-                          (negation
-                           (f (complement l)
-                              (complement r))))
-                        [(:or 'and 'or) x y]
-                        (let [f (func e)
-                              x (simplify x)
-                              y (simplify y)]
-                          (cond (eq x y) x ;; Idempotent Laws
-                                ;; Complement Laws
-                                (switch-or complement-law x y)
-                                (if (conjunction? e) 'F 'T)
-                                ;; Else, sub in new, reduced arguments
-                                :else (list f x y)))
+#+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
+(ns optimizer.core-test
+  (:use optimizer.core)
+  (:require [clojure.core.match :refer [match]]
+            [clojure.test :refer [deftest is]]
+            [clojure.test.check :as tc]
+            [clojure.test.check.clojure-test :refer [defspec]]
+            [clojure.test.check.generators :as gen]
+            [clojure.test.check.properties :as prop]))
 
-                        ;; Involution Law
-                        ['not (x :guard negation?)] (complement x)
-                        ['not x] (negation (simplify x))
-                        :else e))]
-      (fixed-point bool-reduce exp)))
-#+END_SRC
+;; MISC:
+;;
+;; The whole "toAndList thing is about collapsing ors, etc into
+;; non-binary expressions, then reducing using the laws about "A AND
+;; NOT A, things like that. So we flatten out the binary lists,
+;; collapse rules then put them back together again.
+;;
+;;  A AND T = A
+;;  A AND F = F
+;;
+;; ### Notes on the whole beast:
+;;
+;; * First parse.
+;;   * The cheap variables are "Pushable", the expensive ones are not.
+;;   * Compound expressions start out as "undetermined".
+;;   * not expressions are undetermined.
+;; * Get the canonicalConjunction (assign "Pushable" to everything)
+;; * Call pushDownCanonical on the result
+;;   * This removes all nonPushable, converts toAnd, calls
+;; "factorize".
+;; * Factorize converts BACK to "OR" form, and pulls out all that shit
+;; that's in common.
+;;
+;;
+;; ### Notes on the PushDownConverter convert method:
+;;
+;; * BinaryExpression: TODO.
+;;
+;; * ConstantExpression: Pushable. Convert returns itself. Either true
+;; or false. Pushable.
+;;
+;; * VariableExpression: v are Pushable, w are not. Returns itself.
+;;
+;; * Not expression: Indeterminate for pushdown. Implements its custom
+;; convert method by wrapping how the wrapped bullshit gets
+;; converted.
+;; ** T -> F, F -> T
+;; ** NotExpression gets unwrapped -(NOT (NOT A) -> A.
+;; ** If you're converting a variable expression, it takes on the same
+;; Pushability. So constants, etc maintain their pushability.
+;; ** The binary expression case has the "NOT" pulled in using
+;; DeMorgan's laws then's converted again.
 
-And some tests to show off the new simplification:
+;; ## Actual Tests
 
-#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
+;; Generators
+
+(def cheap-v (gen/fmap cheap gen/nat))
+(def expensive-v (gen/fmap expensive gen/nat))
+(def variable (gen/one-of [cheap-v expensive-v]))
+
+(defn tuplefn [g]
+  (letfn [(apply-tuple [[op & xs]] (apply op xs))]
+    (gen/fmap apply-tuple g)))
+
+(defn nested-binary [f]
+  (-> (fn [g]
+        (tuplefn
+         (gen/tuple (gen/return f) g g)))
+      (gen/recursive-gen variable)))
+
+;; Make sure that flatten-and kills all the nested ands.
+(defspec flatten-and-spec
+  100
+  (prop/for-all
+   [e (nested-binary AND)]
+   (let [flattened (flatten-and e)]
+     (and (AND? e)
+          (every? variable? flattened)))))
+
+;; Same thing for or:
+(defspec flatten-or-spec
+  100
+  (prop/for-all
+   [e (nested-binary OR)]
+   (let [flattened (flatten-or e)]
+     (and (OR? e) (every? variable? flattened)))))
+
+;; Also check that and->binary reverses flatten-and.
+(defspec and->binary-spec
+  100
+  (prop/for-all
+   [e (nested-binary AND)]
+   (let [flattened (flatten-and e)]
+     (= flattened (flatten-and (and->binary flattened))))))
+
+;; And the same thing for or:
+(defspec or->binary-spec
+  100
+  (prop/for-all
+   [e (nested-binary OR)]
+   (let [flattened (flatten-or e)]
+     (= flattened (flatten-or (or->binary flattened))))))
+
+(def compound
+  (fn [g]
+    (tuplefn
+     (gen/one-of
+      [(gen/tuple (gen/elements [AND OR]) g g)
+       (gen/tuple (gen/return NOT) g)]))))
+
+(def expr
+  "test.check generator for expressions."
+  (gen/recursive-gen compound variable))
+
+(defn variables
+  "Returns a set of all unique variables in the supplied expression."
+  [e]
+  (let [e (if (expr? e) (flatten e) [e])]
+    (set (filter variable? e))))
+
+(defn sized-expr
+  "Takes some limit on the size of the number of variables in the
+  generated expression and returns a generator that won't break that
+  number."
+  [variable-limit]
+  (gen/such-that #(< (count (variables %))
+                     variable-limit)
+                 expr))
+
+;; ### Solver
+
+(defn solve
+  "Takes an expression and a map of variables -> boolean value."
+  [e m]
+  (letfn [(solve* [e]
+            (match (if (expr? e) (vec e) e)
+                   'T true
+                   'F false
+                   ['and p q] (and (solve* p) (solve* q))
+                   ['or p q] (or (solve* p) (solve* q))
+                   ['not p] (not (solve* p))
+                   :else (m e)))]
+    (solve* e)))
+
+;; Brute force checks of the simplifier.
+
+(defn cartesian-prod
+  "Generates the cartesian product of all the input sequences."
+  [colls]
+  (if (empty? colls)
+    '(())
+    (for [x (first colls)
+          more (cartesian-prod (rest colls))]
+      (cons x more))))
+
+(defn variable-map
+  "Returns a sequence of maps of variable -> Boolean assignment. The
+  returned number of maps is equal to 2^n, where n is the number of
+  variables."
+  [vs]
+  (let [vs (vec vs)
+        c  (count vs)]
+    (map (partial zipmap vs)
+         (cartesian-prod
+          (repeat c [true false])))))
+
+(defn expr-variables
+  "Returns a sequence of maps of the variables that appear in any of
+  the exprs -> boolean combinations."
+  [& exprs]
+  (variable-map (mapcat variables exprs)))
+
+(defn equal?
+  "Are the two expressions equal for every possible input?"
+  [e1 e2]
+  (every? (fn [m]
+            (= (solve e1 m)
+               (solve e2 m)))
+          (expr-variables e1 e2)))
+
+;; Simplifiyng an expression yields an expression equal to the
+;; original expression.
+(defspec simplify-spec
+  100
+  (prop/for-all
+   [e (sized-expr 7)]
+   (let [s (simplify e)]
+     (equal? e s))))
+
+;; Simplifying then factoring shouldn't mess with the equality of the
+;; boolean expressions.
+(defspec factor-spec
+  100
+  (prop/for-all
+   [e (sized-expr 7)]
+   (let [s (simplify e)
+         f (factor s)]
+     (equal? s f))))
+
+;; pushing
+(defspec cheap-spec
+  100
+  (prop/for-all
+   [e (gen/such-that expensive? expr)]
+   (let [p (pushdown-only e)
+         f (factor p)]
+     (and (cheap? p)
+          (cheap? f)))))
+
+;; The simplified function returns true whenever the original would,
+;; and false as often as it can.
+(defspec prefilter-correctness-law
+  100
+  (prop/for-all
+   [e (sized-expr 8)]
+   (let [simplified (pushdown e)]
+     (every? (fn [m]
+               ;; !simplified => !e
+               ;; !(!simplified) OR !e
+               ;; simplified OR !e
+               (or (solve simplified m)
+                   (not (solve e m))))
+             (expr-variables e simplified)))))
+
+;; ## CNF Checks
+
+(defn cnf-literal? [p]
+  (boolean
+   (or (variable? p)
+       (literal? p)
+       (if (NOT? p)
+         (cnf-literal?
+          (second p))))))
+
+(defn cnf-clause? [p]
+  (or (cnf-literal? p)
+      (and (OR? p) (every? cnf-clause? (args p)))))
+
+(defn cnf? [p]
+  (or (cnf-literal? p)
+      (cnf-clause? p)
+      (and (AND? p) (every? cnf-clause? (flatten-and p)))))
+
+(defspec cnf-spec
+  100
+  (prop/for-all [e expr]
+                (cnf? (simplify e))))
+
+;; ## Checkers and testing
+
+(def valid?
+  "Returns true if the supplied expression is a valid boolean
+  expression, false otherwise. The test is applied recursively down to
+  all subforms."
+  (make-checker
+   variable?
+   #(println "Subexpression is invalid: " %)))
+
+(deftest needs-name-test
+  (let [mixed-exp '(and (or w1 v1) v2)]
+    (is (= mixed-exp
+           (AND (OR (expensive 1)
+                    (cheap 1))
+                (cheap 2))))
+    (is (not (cheap? mixed-exp)))
+    (is (valid? mixed-exp))))
+
+(deftest needs-name-two-test
   (let [example-expression '(or (and (and v1 (or v2 v3)) (not w1)) F)]
-    (fact
-      "Reduce away the or F:"
-      (simplify example-expression) => '(and (and v1 (or v2 v3)) (not w1))
+    "Reduce away the or F:"
+    (is (equal? example-expression (simplify example-expression)))
 
-      "and F == F"
-      (simplify '(and (and (and v1 (or v2 v3)) (not w1)) F)) => 'F
+    "and F == F"
+    (is (equal? 'F '(and (and (and v1 (or v2 v3)) (not w1)) F)))
 
-      "No reduction..."
-      (simplify '(and (or w1 v1) v2)) => '(and (or w1 v1) v2)
+    "No reduction..."
+    (is (equal? '(and (or w1 v1) v2)
+                (simplify '(and (or w1 v1) v2))))
 
-      "(or a a) => a"
-      (simplify '(and (or w1 w1) v2)) => '(and w1 v2)))
+    "(or a a) => a"
+    (is (equal? '(and w1 v2)
+                (simplify '(and (or w1 w1) v2))))))
+
 #+END_SRC

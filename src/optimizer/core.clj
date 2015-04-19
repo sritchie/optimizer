@@ -1,7 +1,6 @@
 (ns optimizer.core
-  (:require [clojure.core.match :refer [match]]
+  (:require [clojure.core.match :refer [matchdd]]
             [clojure.set :refer [subset? difference]]))
-
 (def prefixes
   "The set of valid variable prefixes."
   #{\v \w})

@@ -1,8 +1,6 @@
 #+STARTUP: showall indent
 #+STARTUP: hidestars
-#+PROPERTY: padline yes
-#+PROPERTY: comments yes
-#+PROPERTY: cache yes
+#+PROPERTY: header-args :noweb yes :cache yes :padline yes
 
 This post is based on a challenge that [[https://twitter.com/peterseibel][Peter Seibel]] gave our team back in 2013 when I worked at Twitter. He'd been screwing around with Pig and Scalding and was thinking about how some optimizer could rewrite a Pig query to save time on some of the tremendous joins our "customers" were running. Here's the original challenge:
 
@@ -104,7 +102,7 @@ The first step is to parse that grammar. Surprise surprise, Peter's grammar look
 
 Cheap variables start with =v=, expensive variables start with =w=.
 
-#+BEGIN_SRC clojure  :tangle src/optimizer/core.clj
+#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
    (def prefixes
      "The set of valid variable prefixes."
      #{\v \w})
@@ -275,50 +273,108 @@ There are a few boolean simplification laws (see [[http://www.nayuki.io/page/boo
 - Involution Law:  ~(not (not a)) == a~
 - Identity Laws:   ~(and a F) == F~, ~(and a T) == a~, ~(or a F) == a~, ~(or a T) == T~
 - Idempotent Laws: ~(or a a) == a~, ~(and a a) == a~
-- Complement Laws: ~(and a (not a)) == F~, ~(or a (not a)) == T~, ~(not F) == T~, ~(not T) == F~
+- Complement Laws: ~(and a (not a) == F~, ~(or a (not a)) == T~,
+                   ~(not F) == T~, ~(not T) == F~
 - Annihilation:    ~(or a T) == T~, ~(and a F) == F~
+- Absorption Law:  ~(and p (or p q)) == p~, ~(or p (and p q) == p~
 
 We'll also want to apply [[http://en.wikipedia.org/wiki/De_Morgan%2527s_laws][DeMorgan's Law]] in one direction to move negations deeper into the expression:
 
 - ~(not (and p q)) == (or (not p) (not q))~
 - ~(not (or p q))  == (and (not p) (not q))~
 
-STOPPEDHERE
-
-The big bad simplifier. This uses core.match to match certain patterns.
+The =simplify= function we want will take a valid boolean expression and return a valid boolean expression. Here's a first try, using [[https://github.com/clojure/core.match][core.match]]'s pattern matching to destructure our boolean expressions. Take a look at the whole thing before we break it down.
 
 #+NAME: simplify
 #+BEGIN_SRC clojure
   (defn simplify
-    "returns a simplified expression in conjunctive normal
-    form."
+    "returns a simplified expression in Conjunctive Normal
+    Form."
     [exp]
     (match (if (expr? exp) (vec exp) exp)
            ;; AND and OR simplification
-           ['and p q] (simplify-and (simplify p) (simplify q))
-           ['or  p q] (simplify-or  (simplify p) (simplify q))
+           <<binary-simple>>
 
-           ;; NOT simplification:
-           ['not 'T] 'F
-           ['not 'F] 'T
+           ;; NOT complement laws:
+           <<not-simple>>
 
            ;; (NOT (NOT p)) => p (involution law)
-           ['not (['not p] :seq)] (simplify p)
+           <<involution>>
 
            ;; DeMorgan's Laws
-           ['not (['and p q] :seq)] (simplify (OR (NOT p) (NOT q)))
-           ['not (['or p q] :seq)] (simplify (AND (NOT p) (NOT q)))
-           ['not x] (NOT (simplify x))
+           <<demorgan>>
+
+           <<simplify-negation>>
 
            ;; Returns constants and literals.
            :else exp))
 #+END_SRC
 
+Make sense? If the argument's a valid expression via ~(expr? expr)~, turn it into a vector to make pattern matching look cleaner. Otherwise leave it alone.
+
+If we have a conjunction or disjunction, we'll use the helper functions =simplify-and= and =simplify-or= to apply the simplification laws from above to the recursively-simplified expression arguments. (If you don't know how to code something, functional programming is brilliant at letting you kick the problem down the road into another function.)
+
+#+NAME: binary-simple
+#+BEGIN_SRC clojure
+  ['and p q] (simplify-and (simplify p) (simplify q))
+  ['or  p q] (simplify-or  (simplify p) (simplify q))
+#+END_SRC
+
+If the expression is a negation, we can apply a few laws directly inside the pattern match. Negating a literal gives back a literal:
+
+#+NAME: not-simple
+#+BEGIN_SRC clojure
+    ['not 'T] 'F
+    ['not 'F] 'T
+#+END_SRC
+
+If the negation has another negation inside of it, we can un-nest the =p= of =(not (not p))= and recursively simplify it. (Note that core.match needs that internal =(,,, :seq)= wrapper to match a list).
+
+#+NAME: involution
+#+BEGIN_SRC clojure
+  ['not (['not p] :seq)] (simplify p)
+#+END_SRC
+
+Otherwise we just simplify the argument and return the negation of that:
+
+#+NAME: simplify-negation
+#+BEGIN_SRC clojure
+  ['not x] (NOT (simplify x))
+#+END_SRC
+
+DeMorgan's laws are easy to match as well. If we see ~(not (and p q))~ or ~(not (or p q))~, we apply the law and simplify the resulting form.
+
+#+NAME: demorgan
+#+BEGIN_SRC clojure
+  ['not (['and p q] :seq)] (simplify (OR (NOT p) (NOT q)))
+  ['not (['or p q] :seq)] (simplify (AND (NOT p) (NOT q)))
+#+END_SRC
+
+The =:else= clause bounces literals and variables back out without any transformation.
+
+Now we have to write =simplify-and= and =simplify-or=.
+
 *** Flattening
 
-Many of those simplifications
+After thinking about this for a while, it became clear that simplifying binary expressions was a major pain in the ass. Take annihilation:
 
-First part involves going back and forth from binary functions to a flattened list.
+#+BEGIN_EXAMPLE
+(and a (not a)) => F
+#+END_EXAMPLE
+
+It's really hard to find this pattern with deep nesting of =AND= expressions:
+
+#+BEGIN_SRC clojure
+(and (and a b) (and c (not a)))
+#+END_SRC
+
+It's much easier to deal with the simplification laws with some way of flattening out those binary expressions. We need a way of transforming the above expression into
+
+#+BEGIN_SRC clojure
+(and a b c (not a))
+#+END_SRC
+
+Then it becomes easy to perform operations on the set of all conjunctions. Because we'll need to flatten =AND= and =OR= trees, I wrote a =flatten-binary= function that takes a predicate to see if some expression can be flattened. I can't express it without a type system, but pred has to be =AND?= or =OR?= from above.
 
 #+BEGIN_SRC clojure :tangle src/optimizer/core.clj
   (defn flatten-binary
@@ -337,12 +393,18 @@ First part involves going back and forth from binary functions to a flattened li
                     (flatten* x)
                     [x]))
                 (rest e)))))
+#+END_SRC
 
+The returned function takes an expression. If that expression does NOT pass the predicate - say the predicate is =AND?= and you pass in =(or a b)= - it returns a singleton list with that argument.
+
+If it does pass the predicate, every argument to the expression gets flattened recursively using that same predicate and concatenated together. Now we can make specific versions for =AND?= and =OR?=:
+
+#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
   (def flatten-and (flatten-binary AND?))
   (def flatten-or (flatten-binary OR?))
 #+END_SRC
 
-Then we need to go back to the binary form:
+Flattening is great for simplification, but to stick to the grammar we'll need to convert a flattened expression back into a nested form. The beatifully-named =op->binary= does this by folding all the expression arguments together using =AND= or =OR=. If the argument list is empty, you get the literal ='T= back out.
 
 #+BEGIN_SRC clojure :tangle src/optimizer/core.clj
   (defn op->binary
@@ -351,14 +413,20 @@ Then we need to go back to the binary form:
     [op]
     (fn [[x & xs]]
       (reduce op (or x 'T) xs)))
+#+END_SRC
 
+Specialized versions, like before:
+
+#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
   (def and->binary (op->binary AND))
   (def or->binary (op->binary OR))
 #+END_SRC
 
+*** Absorption Law
+
 Next we model the absorption law. This is why we needed to flatten stuff; so we can look for cases of this.
 
-#+NAME absorption-law
+#+NAME: absorption-law
 #+BEGIN_SRC clojure
   (defn combinations
     "Thanks to amalloy: https://gist.github.com/amalloy/1042047"
@@ -396,9 +464,11 @@ Next we model the absorption law. This is why we needed to flatten stuff; so we 
            (seq))))
 #+END_SRC
 
+*** Final Simplifications
+
 Finally we can handle the other binary expression simplifications we haven't deal with yet. Thing thing can take binary arguments OR an entire flattened list. Makes it easier to call below.
 
-#+NAME simplify-binary
+#+NAME: simplify_binary
 #+BEGIN_SRC clojure
   (defn simplify-binary
     "Returns a function that simplifies binary expressions.
@@ -430,7 +500,7 @@ Finally we can handle the other binary expression simplifications we haven't dea
 
 To make a conjunction simplifier we configure =simplify-binary=:
 
-#+NAME simplify-and
+#+NAME: simplify-and
 #+BEGIN_SRC clojure
   (def simplify-and
     "Returns a function that simplifies an AND expression. Returns an
@@ -445,7 +515,7 @@ To make a conjunction simplifier we configure =simplify-binary=:
 
 Or's a little harder, since we have to use the distributive law to turn the =OR= into an =AND=.
 
-#+NAME simplify-or
+#+NAME: simplify-or
 #+BEGIN_SRC clojure
   (def simplify-or*
     "Returns a function that simplifies an OR expression."
@@ -466,11 +536,13 @@ Or's a little harder, since we have to use the distributive law to turn the =OR=
        (simplify-or* l r))))
 #+END_SRC
 
-#+BEGIN_SRC clojure :noweb yes :tangle src/optimizer/core.clj :exports none
+#+BEGIN_SRC clojure :tangle src/optimizer/core.clj :exports none
 <<absorption-law>>
-<<simplify-binary>>
+<<simplifybinary>>
 <<simplify-and>>
 <<simplify-or>>
+
+;; Finally, someting work
 <<simplify>>
 #+END_SRC
 
@@ -794,7 +866,7 @@ Some extra remaining tests:
       (is (not (cheap? mixed-exp)))
       (is (valid? mixed-exp))))
 
-  (deftest needs-name-two-test
+  (deftest simplify-tests
     (let [example-expression '(or (and (and v1 (or v2 v3)) (not w1)) F)]
       "Reduce away the or F:"
       (is (equal? example-expression (simplify example-expression)))

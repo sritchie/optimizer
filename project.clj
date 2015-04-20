@@ -1,3 +1,4 @@
+
 (defproject io.samritchie/optimizer "0.1.0-SNAPSHOT"
   :description "Boolean Optimizer in Clojure."
   :url "https://github.com/sritchie/optimizer"

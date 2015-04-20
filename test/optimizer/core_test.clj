@@ -1,3 +1,4 @@
+
 (ns optimizer.core-test
   (:use optimizer.core)
   (:require [clojure.core.match :refer [match]]
@@ -6,9 +7,11 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]))
+
 (def cheap-v (gen/fmap cheap gen/nat))
 (def expensive-v (gen/fmap expensive gen/nat))
 (def variable (gen/one-of [cheap-v expensive-v]))
+
 (defn tuplefn [g]
   (letfn [(apply-tuple [[op & xs]] (apply op xs))]
     (gen/fmap apply-tuple g)))
@@ -138,8 +141,6 @@
    (let [s (simplify e)]
      (equal? e s))))
 
-;; Simplifying then factoring shouldn't mess with the equality of the
-;; boolean expressions.
 (defspec factor-spec
   100
   (prop/for-all
@@ -158,8 +159,6 @@
      (and (cheap? p)
           (cheap? f)))))
 
-;; The simplified function returns true whenever the original would,
-;; and false as often as it can.
 (defspec prefilter-correctness-law
   100
   (prop/for-all
@@ -197,8 +196,6 @@
   (prop/for-all [e expr]
                 (cnf? (simplify e))))
 
-;; ## Checkers and testing
-
 (def valid?
   "Returns true if the supplied expression is a valid boolean
   expression, false otherwise. The test is applied recursively down to
@@ -216,7 +213,7 @@
     (is (not (cheap? mixed-exp)))
     (is (valid? mixed-exp))))
 
-(deftest needs-name-two-test
+(deftest simplify-tests
   (let [example-expression '(or (and (and v1 (or v2 v3)) (not w1)) F)]
     "Reduce away the or F:"
     (is (equal? example-expression (simplify example-expression)))

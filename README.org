@@ -1,8 +1,10 @@
 #+STARTUP: showall indent
 #+STARTUP: hidestars
-#+PROPERTY: header-args :padline yes :comments yes :cache yes
+#+PROPERTY: padline yes
+#+PROPERTY: comments yes
+#+PROPERTY: cache yes
 
-This post is based on a challenge that [[https://twitter.com/peterseibel][Peter Seibel]] gave our team back when I worked at Twitter. He'd been screwing around with Pig and Scalding and was thinking about how some optimizer could rewrite a Pig query to save time on some of the tremendous joins our "customers" were running. Here's the original challenge:
+This post is based on a challenge that [[https://twitter.com/peterseibel][Peter Seibel]] gave our team back in 2013 when I worked at Twitter. He'd been screwing around with Pig and Scalding and was thinking about how some optimizer could rewrite a Pig query to save time on some of the tremendous joins our "customers" were running. Here's the original challenge:
 
 * The Challenge
 
@@ -227,66 +229,94 @@ Finally, a compound validator for expressions:
     (some-fn AND? OR? NOT?))
 #+END_SRC
 
-** Simplifying
+** Splitting the Expression
 
-There are a few laws we can always apply that will lead to reductions.
+The original challenge was to pull a boolean expression out into two expressions, such that
 
-- Involution Law: ~(not (not a)) == a~
-- Identity Laws: ~(and a F) == F~, ~(and a T) == a~, ~(or a F) == a~, ~(or a T) == T~
+#+BEGIN_EXAMPLE
+  f(v1,v2,..vn) = g(v1,v2,...vk) && f(v1,v2,..vn)
+#+END_EXAMPLE
+
+This restriction made a lot more sense here in 2015 now that I've heard of "[[http://en.wikipedia.org/wiki/Conjunctive_normal_form][Conjunctive Normal Form]]", or CNF.
+
+*** Conjunctive Normal Form
+
+A CNF expression =AND=s together a bunch of "clauses"; a clause can be a disjunction or a negation (an =OR= or a =NOT=), a literal or a variable. Clauses can nest inside each other, but =AND=s only exist at the top level.
+
+Here are some examples from the [[http://en.wikipedia.org/wiki/Conjunctive_normal_form][wiki page]]:
+
+#+BEGIN_SRC clojure
+  (and (not a) (or b c))
+  (and (and (or a b)
+            (or (or (not b) c)
+                (not d)))
+       (or d (not e)))
+  (and a b)
+
+  ;; Because there's only one clause, this is like (and T (or a b))
+  (or a b)
+#+END_SRC
+
+These expressions break the CNF rules:
+
+#+BEGIN_SRC clojure
+  (not (and b c)) ;; top level negation
+  (or c (and a b)) ;; and inside or
+#+END_SRC
+
+Every boolean expression can be converted to CNF through the mechanical transformations we'll implement below. [[http://www.cs.jhu.edu/~jason/tutorials/convert-to-CNF.html][This page]] does a nice job of describing the algorithm.
+
+*** Simplifying
+
+Along the way to CNF the optimizer will also try to simplify the incoming boolean expressions. If some simplification kills an expensive variable, great!
+
+There are a few boolean simplification laws (see [[http://www.nayuki.io/page/boolean-algebra-laws][this page]] for a nice summary) that will lead toward CNF and potentially kill terms.
+
+- Involution Law:  ~(not (not a)) == a~
+- Identity Laws:   ~(and a F) == F~, ~(and a T) == a~, ~(or a F) == a~, ~(or a T) == T~
 - Idempotent Laws: ~(or a a) == a~, ~(and a a) == a~
 - Complement Laws: ~(and a (not a)) == F~, ~(or a (not a)) == T~, ~(not F) == T~, ~(not T) == F~
+- Annihilation:    ~(or a T) == T~, ~(and a F) == F~
 
-Also one direction of DeMorgan's law.
+We'll also want to apply [[http://en.wikipedia.org/wiki/De_Morgan%2527s_laws][DeMorgan's Law]] in one direction to move negations deeper into the expression:
 
-  ;; Note: The basic algorithm is here:
-  ;; http://www.cs.jhu.edu/~jason/tutorials/convert-to-CNF.html
-  ;;
-  ;; NOTE: We still have a couple of simplifications we could implement
-  ;; from here: http://www.nayuki.io/page/boolean-algebra-laws no name
-  ;; and consensus.
+- ~(not (and p q)) == (or (not p) (not q))~
+- ~(not (or p q))  == (and (not p) (not q))~
 
-  ;; MISC:
-  ;;
-  ;; The whole "toAndList thing is about collapsing ors, etc into
-  ;; non-binary expressions, then reducing using the laws about "A AND
-  ;; NOT A, things like that. So we flatten out the binary lists,
-  ;; collapse rules then put them back together again.
-  ;;
-  ;;  A AND T = A
-  ;;  A AND F = F
-  ;;
-  ;; ### Notes on the whole beast:
-  ;;
-  ;; * First parse.
-  ;;   * The cheap variables are "Pushable", the expensive ones are not.
-  ;;   * Compound expressions start out as "undetermined".
-  ;;   * not expressions are undetermined.
-  ;; * Get the canonicalConjunction (assign "Pushable" to everything)
-  ;; * Call pushDownCanonical on the result
-  ;;   * This removes all nonPushable, converts toAnd, calls
-  ;; "factorize".
-  ;; * Factorize converts BACK to "OR" form, and pulls out all that shit
-  ;; that's in common.
-  ;;
-  ;;
-  ;; ### Notes on the PushDownConverter convert method:
-  ;;
-  ;; * BinaryExpression: TODO.
-  ;;
-  ;; * ConstantExpression: Pushable. Convert returns itself. Either true
-  ;; or false. Pushable.
-  ;;
-  ;; * VariableExpression: v are Pushable, w are not. Returns itself.
-  ;;
-  ;; * Not expression: Indeterminate for pushdown. Implements its custom
-  ;; convert method by wrapping how the wrapped bullshit gets
-  ;; converted.
-  ;; ** T -> F, F -> T
-  ;; ** NotExpression gets unwrapped -(NOT (NOT A) -> A.
-  ;; ** If you're converting a variable expression, it takes on the same
-  ;; Pushability. So constants, etc maintain their pushability.
-  ;; ** The binary expression case has the "NOT" pulled in using
-  ;; DeMorgan's laws then's converted again.
+STOPPEDHERE
+
+The big bad simplifier. This uses core.match to match certain patterns.
+
+#+NAME: simplify
+#+BEGIN_SRC clojure
+  (defn simplify
+    "returns a simplified expression in conjunctive normal
+    form."
+    [exp]
+    (match (if (expr? exp) (vec exp) exp)
+           ;; AND and OR simplification
+           ['and p q] (simplify-and (simplify p) (simplify q))
+           ['or  p q] (simplify-or  (simplify p) (simplify q))
+
+           ;; NOT simplification:
+           ['not 'T] 'F
+           ['not 'F] 'T
+
+           ;; (NOT (NOT p)) => p (involution law)
+           ['not (['not p] :seq)] (simplify p)
+
+           ;; DeMorgan's Laws
+           ['not (['and p q] :seq)] (simplify (OR (NOT p) (NOT q)))
+           ['not (['or p q] :seq)] (simplify (AND (NOT p) (NOT q)))
+           ['not x] (NOT (simplify x))
+
+           ;; Returns constants and literals.
+           :else exp))
+#+END_SRC
+
+*** Flattening
+
+Many of those simplifications
 
 First part involves going back and forth from binary functions to a flattened list.
 
@@ -328,7 +358,8 @@ Then we need to go back to the binary form:
 
 Next we model the absorption law. This is why we needed to flatten stuff; so we can look for cases of this.
 
-#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
+#+NAME absorption-law
+#+BEGIN_SRC clojure
   (defn combinations
     "Thanks to amalloy: https://gist.github.com/amalloy/1042047"
     [n coll]
@@ -365,7 +396,10 @@ Next we model the absorption law. This is why we needed to flatten stuff; so we 
            (seq))))
 #+END_SRC
 
-#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
+Finally we can handle the other binary expression simplifications we haven't deal with yet. Thing thing can take binary arguments OR an entire flattened list. Makes it easier to call below.
+
+#+NAME simplify-binary
+#+BEGIN_SRC clojure
   (defn simplify-binary
     "Returns a function that simplifies binary expressions.
 
@@ -394,9 +428,10 @@ Next we model the absorption law. This is why we needed to flatten stuff; so we 
                 (zip-fn)))))))
 #+END_SRC
 
-Specific ones for and and or:
+To make a conjunction simplifier we configure =simplify-binary=:
 
-#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
+#+NAME simplify-and
+#+BEGIN_SRC clojure
   (def simplify-and
     "Returns a function that simplifies an AND expression. Returns an
     expression in conjunctive normal form."
@@ -406,7 +441,12 @@ Specific ones for and and or:
       :id 'T
       :flatten-fn flatten-and
       :tear-fn flatten-or}))
+#+END_SRC
 
+Or's a little harder, since we have to use the distributive law to turn the =OR= into an =AND=.
+
+#+NAME simplify-or
+#+BEGIN_SRC clojure
   (def simplify-or*
     "Returns a function that simplifies an OR expression."
     (simplify-binary
@@ -426,33 +466,15 @@ Specific ones for and and or:
        (simplify-or* l r))))
 #+END_SRC
 
-The big bad simplifier. This uses core.match to match certain patterns.
-
-#+BEGIN_SRC clojure :tangle src/optimizer/core.clj
-  (defn simplify
-    "returns a simplified expression in conjunctive normal
-    form."
-    [exp]
-    (match (if (expr? exp) (vec exp) exp)
-           ;; AND and OR simplification
-           ['and p q] (simplify-and (simplify p) (simplify q))
-           ['or  p q] (simplify-or  (simplify p) (simplify q))
-
-           ;; NOT simplification:
-           ['not 'T] 'F
-           ['not 'F] 'T
-
-           ;; (NOT (NOT p)) => p (involution law)
-           ['not (['not p] :seq)] (simplify p)
-
-           ;; DeMorgan's Laws
-           ['not (['and p q] :seq)] (simplify (OR (NOT p) (NOT q)))
-           ['not (['or p q] :seq)] (simplify (AND (NOT p) (NOT q)))
-           ['not x] (NOT (simplify x))
-
-           ;; Returns constants and literals.
-           :else exp))
+#+BEGIN_SRC clojure :noweb yes :tangle src/optimizer/core.clj :exports none
+<<absorption-law>>
+<<simplify-binary>>
+<<simplify-and>>
+<<simplify-or>>
+<<simplify>>
 #+END_SRC
+
+*** Killing expensive variables
 
 To solve the puzzle, We need to flatten all the conjunctions out and kill any conjunction that has expensive variables. First step is to write a checker that can see if a subexpression only have cheap variables.
 
@@ -488,6 +510,8 @@ Finally, the solution:
     (and->binary
      (filter cheap? (flatten-and (simplify exp)))))
 #+END_SRC
+
+*** Factoring
 
 Factoring reverses out that explosion we got, tearing the ORs out to get into CNF.
 
@@ -529,6 +553,8 @@ Factoring reverses out that explosion we got, tearing the ORs out to get into CN
     (comp factor pushdown-only))
 #+END_SRC
 
+** Tests
+
 Now let's get to the tests! Here are the variable generators
 
 #+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
@@ -537,6 +563,7 @@ Now let's get to the tests! Here are the variable generators
   (def variable (gen/one-of [cheap-v expensive-v]))
 #+END_SRC
 
+Big bad recursive generators:
 
 #+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
   (defn tuplefn [g]
@@ -548,7 +575,11 @@ Now let's get to the tests! Here are the variable generators
           (tuplefn
            (gen/tuple (gen/return f) g g)))
         (gen/recursive-gen variable)))
+#+END_SRC
 
+Flatten and re-binary tests:
+
+#+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
   ;; Make sure that flatten-and kills all the nested ands.
   (defspec flatten-and-spec
     100
@@ -581,7 +612,11 @@ Now let's get to the tests! Here are the variable generators
      [e (nested-binary OR)]
      (let [flattened (flatten-or e)]
        (= flattened (flatten-or (or->binary flattened))))))
+#+END_SRC
 
+Expression generator:
+
+#+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
   (def compound
     (fn [g]
       (tuplefn
@@ -592,7 +627,9 @@ Now let's get to the tests! Here are the variable generators
   (def expr
     "test.check generator for expressions."
     (gen/recursive-gen compound variable))
+#+END_SRC
 
+#+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
   (defn variables
     "Returns a set of all unique variables in the supplied expression."
     [e]
@@ -667,9 +704,12 @@ Now let's get to the tests! Here are the variable generators
      [e (sized-expr 7)]
      (let [s (simplify e)]
        (equal? e s))))
+#+END_SRC
 
-  ;; Simplifying then factoring shouldn't mess with the equality of the
-  ;; boolean expressions.
+Factoring tests. Simplifying then factoring shouldn't mess with the equality of the boolean expressions.
+
+
+#+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
   (defspec factor-spec
     100
     (prop/for-all
@@ -687,9 +727,11 @@ Now let's get to the tests! Here are the variable generators
            f (factor p)]
        (and (cheap? p)
             (cheap? f)))))
+#+END_SRC
 
-  ;; The simplified function returns true whenever the original would,
-  ;; and false as often as it can.
+And the final law! The simplified function returns true whenever the original would, and false as often as it can.
+
+#+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
   (defspec prefilter-correctness-law
     100
     (prop/for-all
@@ -702,7 +744,11 @@ Now let's get to the tests! Here are the variable generators
                  (or (solve simplified m)
                      (not (solve e m))))
                (expr-variables e simplified)))))
+#+END_SRC
 
+CNF tests:
+
+#+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
   ;; ## CNF Checks
 
   (defn cnf-literal? [p]
@@ -726,9 +772,11 @@ Now let's get to the tests! Here are the variable generators
     100
     (prop/for-all [e expr]
                   (cnf? (simplify e))))
+#+END_SRC
 
-  ;; ## Checkers and testing
+Some extra remaining tests:
 
+#+BEGIN_SRC clojure :tangle test/optimizer/core_test.clj
   (def valid?
     "Returns true if the supplied expression is a valid boolean
     expression, false otherwise. The test is applied recursively down to
@@ -761,5 +809,4 @@ Now let's get to the tests! Here are the variable generators
       "(or a a) => a"
       (is (equal? '(and w1 v2)
                   (simplify '(and (or w1 w1) v2))))))
-
 #+END_SRC

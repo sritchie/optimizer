@@ -167,32 +167,33 @@
               (absorption-law tear-fn)
               (zip-fn)))))))
 (def simplify-and
-  "Returns a function that simplifies an AND expression. Returns an
-  expression in conjunctive normal form."
-  (simplify-binary
-   {:ctor AND
-    :annihilator 'F
-    :id 'T
-    :flatten-fn flatten-and
-    :tear-fn flatten-or}))
+    "Returns a function that simplifies an AND expression. Returns an
+    expression in conjunctive normal form."
+    (simplify-binary
+     {:ctor AND
+      :annihilator 'F
+      :id 'T
+      :flatten-fn flatten-and
+      :tear-fn flatten-or}))
 
-(def simplify-or*
-  "Returns a function that simplifies an OR expression."
-  (simplify-binary
-   {:ctor OR
-    :id 'F
-    :annihilator 'T
-    :flatten-fn flatten-or
-    :tear-fn flatten-and}))
+  (def simplify-or*
+    "Returns a function that simplifies an OR expression."
+    (simplify-binary
+     {:ctor OR
+      :id 'F
+      :annihilator 'T
+      :flatten-fn flatten-or
+      :tear-fn flatten-and}))
 
-(defn simplify-or
-  "Applies the distributive law to convert the OR into CNF, then
-  applies the AND simplifications."
-  [l r]
-  (simplify-and
-   (for [l (flatten-and l)
-         r (flatten-and r)]
-     (simplify-or* l r))))
+  (defn simplify-or
+    "Applies the distributive law to convert the OR into CNF, then
+    applies the AND simplifications."
+    [l r]
+    (simplify-and
+     (for [l (flatten-and l)
+           r (flatten-and r)]
+       (simplify-or* l r))))
+
 (defn simplify
   "returns a simplified expression in conjunctive normal
   form."

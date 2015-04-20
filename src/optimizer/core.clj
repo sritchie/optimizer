@@ -119,15 +119,15 @@
 (def or->binary (op->binary OR))
 
 (defn combinations
-  "Thanks to amalloy: https://gist.github.com/amalloy/1042047"
-  [n coll]
-  (if (= 1 n)
-    (map list coll)
-    (lazy-seq
-     (when-let [[head & tail] (seq coll)]
-       (concat (for [x (combinations (dec n) tail)]
-                 (cons head x))
-               (combinations n tail))))))
+    "Thanks to amalloy: https://gist.github.com/amalloy/1042047"
+    [n coll]
+    (if (= 1 n)
+      (map list coll)
+      (lazy-seq
+       (when-let [[head & tail] (seq coll)]
+         (concat (for [x (combinations (dec n) tail)]
+                   (cons head x))
+                 (combinations n tail))))))
 
 (defn absorption-law
   "let lawHandled = case `flatten-fn` of
@@ -195,7 +195,6 @@
     :annihilator 'T
     :flatten-fn flatten-or
     :tear-fn flatten-and}))
-
 (defn simplify-or
   "Applies the distributive law to convert the OR into CNF, then
   applies the AND simplifications."
@@ -204,8 +203,6 @@
    (for [l (flatten-and l)
          r (flatten-and r)]
      (simplify-or* l r))))
-
-;; Finally, someting work
 (defn simplify
   "returns a simplified expression in Conjunctive Normal
   Form."
@@ -232,7 +229,8 @@
          :else exp))
 
 (defn make-checker
-  "Takes a predicate that checks the leaves."
+  "Takes a predicate that checks the leaves. Optionally takes an
+  `else` function called if an invalid expression is passed in."
   ([pred] (make-checker pred (fn [_] false)))
   ([pred else]
    (fn recurse [exp]

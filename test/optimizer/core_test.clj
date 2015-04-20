@@ -10,17 +10,43 @@
 
 (def cheap-v (gen/fmap cheap gen/nat))
 (def expensive-v (gen/fmap expensive gen/nat))
+
 (def variable (gen/one-of [cheap-v expensive-v]))
 
-(defn tuplefn [g]
-  (letfn [(apply-tuple [[op & xs]] (apply op xs))]
-    (gen/fmap apply-tuple g)))
+;; optimizer.core-test> (gen/sample variable 10)
+;; (v0 w1 w0 v2 v4 w4 w5 w1 v3 v2)
 
-(defn nested-binary [f]
-  (-> (fn [g]
-        (tuplefn
-         (gen/tuple (gen/return f) g g)))
-      (gen/recursive-gen variable)))
+(def literal-gen (gen/elements literals))
+
+(def non-compound
+      (gen/one-of [variable literal-gen]))
+
+(defn tuplefn
+    "Takes a generator that spits out lists where the first item is a
+    function. Returns a new generator that applies that function to the
+    other items in the coll."
+    [g]
+    (letfn [(apply-tuple [[op & xs]] (apply op xs))]
+      (gen/fmap apply-tuple g)))
+
+  (defn nested-binary
+    "Takes a binary constructor (AND or OR) and returns a generator of
+    those types of expressions."
+    [f]
+    (-> (fn [g]
+          (tuplefn
+           (gen/tuple (gen/return f) g g)))
+        (gen/recursive-gen non-compound)))
+(def compound
+  (fn [g]
+    (tuplefn
+     (gen/one-of
+      [(gen/tuple (gen/elements [AND OR]) g g)
+       (gen/tuple (gen/return NOT) g)]))))
+
+(def expr
+  "test.check generator for expressions."
+  (gen/recursive-gen compound non-compound))
 
 ;; Make sure that flatten-and kills all the nested ands.
 (defspec flatten-and-spec
@@ -64,7 +90,7 @@
 
 (def expr
   "test.check generator for expressions."
-  (gen/recursive-gen compound variable))
+  (gen/recursive-gen compound (gen/one-of [variable literal-gen])))
 
 (defn variables
   "Returns a set of all unique variables in the supplied expression."
@@ -204,14 +230,17 @@
    variable?
    #(println "Subexpression is invalid: " %)))
 
-(deftest needs-name-test
-  (let [mixed-exp '(and (or w1 v1) v2)]
+(deftest cheap-expression-test
+  (let [mixed-exp '(and (or w1 v1) v2)
+        cheap-exp '(and (or v1 v2) v3)]
     (is (= mixed-exp
            (AND (OR (expensive 1)
                     (cheap 1))
                 (cheap 2))))
-    (is (not (cheap? mixed-exp)))
-    (is (valid? mixed-exp))))
+    (is (cheap? mixed-exp))
+    (is (expensive? mixed-exp))
+    (is (and (valid? cheap-exp)
+             (valid? mixed-exp)))))
 
 (deftest simplify-tests
   (let [example-expression '(or (and (and v1 (or v2 v3)) (not w1)) F)]

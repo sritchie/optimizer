@@ -8,5 +8,4 @@
   :profiles {:provided
              {:dependencies [[org.clojure/clojure "1.6.0"]]}
              :dev
-             {:resource-paths ["dev"]
-              :dependencies [[org.clojure/test.check "0.7.0"]]}})
+             {:dependencies [[org.clojure/test.check "0.7.0"]]}})

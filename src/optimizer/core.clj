@@ -152,7 +152,32 @@
          (reduce into #{})
          (difference exprs)
          (seq))))
+(defn simplify-binary
+  "Returns a function that simplifies binary expressions.
 
+  Rules handled:
+
+  Annihilator: (p OR T) = T, (p AND F) = F
+  Identity:    (p AND T) = p, (p OR F) = p
+  Idempotence: (p AND p) = (p OR p) = p (accumulating into a set)
+  Complement:  (p AND (NOT p)) = F, (p OR (NOT p)) = T
+
+  The flattening implementation depends on associativity and
+  commutativity."
+  [{:keys [ctor annihilator id flatten-fn tear-fn]}]
+  (let [zip-fn (op->binary ctor)]
+    (fn attack
+      ([l r] (attack (flatten-fn (ctor l r))))
+      ([xs]
+       (letfn [(absorb [acc p]
+                 (cond (= p id) acc
+                       (or (= p annihilator)
+                           (acc (NOT p)))
+                       (reduced [annihilator])
+                       :else (conj acc p)))]
+         (->> (reduce absorb #{} xs)
+              (absorption-law tear-fn)
+              (zip-fn)))))))
 (def simplify-and
   "Returns a function that simplifies an AND expression. Returns an
   expression in conjunctive normal form."
@@ -200,6 +225,7 @@
          ;; DeMorgan's Laws
          ['not (['and p q] :seq)] (simplify (OR (NOT p) (NOT q)))
          ['not (['or p q] :seq)] (simplify (AND (NOT p) (NOT q)))
+
          ['not x] (NOT (simplify x))
 
          ;; Returns constants and literals.

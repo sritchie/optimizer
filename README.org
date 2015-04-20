@@ -1,6 +1,6 @@
 #+STARTUP: showall indent
 #+STARTUP: hidestars
-#+PROPERTY: header-args :noweb yes :cache yes :padline yes
+#+PROPERTY: header-args :noweb yes :cache yes :padline yes :tangle no
 
 This post is based on a challenge that [[https://twitter.com/peterseibel][Peter Seibel]] gave our team back in 2013 when I worked at Twitter. He'd been screwing around with Pig and Scalding and was thinking about how some optimizer could rewrite a Pig query to save time on some of the tremendous joins our "customers" were running. Here's the original challenge:
 
@@ -73,8 +73,7 @@ Here's the =project.clj= file. For testing I'm using [[https://github.com/clojur
     :profiles {:provided
                {:dependencies [[org.clojure/clojure "1.6.0"]]}
                :dev
-               {:resource-paths ["dev"]
-                :dependencies [[org.clojure/test.check "0.7.0"]]}})
+               {:dependencies [[org.clojure/test.check "0.7.0"]]}})
 #+END_SRC
 
 #+BEGIN_SRC clojure :tangle src/optimizer/core.clj :exports none
@@ -468,7 +467,7 @@ Next we model the absorption law. This is why we needed to flatten stuff; so we 
 
 Finally we can handle the other binary expression simplifications we haven't deal with yet. Thing thing can take binary arguments OR an entire flattened list. Makes it easier to call below.
 
-#+NAME: simplify_binary
+#+NAME: simplify-binary
 #+BEGIN_SRC clojure
   (defn simplify-binary
     "Returns a function that simplifies binary expressions.
@@ -538,7 +537,7 @@ Or's a little harder, since we have to use the distributive law to turn the =OR=
 
 #+BEGIN_SRC clojure :tangle src/optimizer/core.clj :exports none
 <<absorption-law>>
-<<simplifybinary>>
+<<simplify-binary>>
 <<simplify-and>>
 <<simplify-or>>
 

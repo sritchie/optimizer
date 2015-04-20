@@ -6,58 +6,9 @@
             [clojure.test.check.clojure-test :refer [defspec]]
             [clojure.test.check.generators :as gen]
             [clojure.test.check.properties :as prop]))
-
-;; MISC:
-;;
-;; The whole "toAndList thing is about collapsing ors, etc into
-;; non-binary expressions, then reducing using the laws about "A AND
-;; NOT A, things like that. So we flatten out the binary lists,
-;; collapse rules then put them back together again.
-;;
-;;  A AND T = A
-;;  A AND F = F
-;;
-;; ### Notes on the whole beast:
-;;
-;; * First parse.
-;;   * The cheap variables are "Pushable", the expensive ones are not.
-;;   * Compound expressions start out as "undetermined".
-;;   * not expressions are undetermined.
-;; * Get the canonicalConjunction (assign "Pushable" to everything)
-;; * Call pushDownCanonical on the result
-;;   * This removes all nonPushable, converts toAnd, calls
-;; "factorize".
-;; * Factorize converts BACK to "OR" form, and pulls out all that shit
-;; that's in common.
-;;
-;;
-;; ### Notes on the PushDownConverter convert method:
-;;
-;; * BinaryExpression: TODO.
-;;
-;; * ConstantExpression: Pushable. Convert returns itself. Either true
-;; or false. Pushable.
-;;
-;; * VariableExpression: v are Pushable, w are not. Returns itself.
-;;
-;; * Not expression: Indeterminate for pushdown. Implements its custom
-;; convert method by wrapping how the wrapped bullshit gets
-;; converted.
-;; ** T -> F, F -> T
-;; ** NotExpression gets unwrapped -(NOT (NOT A) -> A.
-;; ** If you're converting a variable expression, it takes on the same
-;; Pushability. So constants, etc maintain their pushability.
-;; ** The binary expression case has the "NOT" pulled in using
-;; DeMorgan's laws then's converted again.
-
-;; ## Actual Tests
-
-;; Generators
-
 (def cheap-v (gen/fmap cheap gen/nat))
 (def expensive-v (gen/fmap expensive gen/nat))
 (def variable (gen/one-of [cheap-v expensive-v]))
-
 (defn tuplefn [g]
   (letfn [(apply-tuple [[op & xs]] (apply op xs))]
     (gen/fmap apply-tuple g)))

@@ -1,33 +1,34 @@
 (ns optimizer.core
-  (:require [clojure.core.match :refer [matchdd]]
+  (:require [clojure.core.match :refer [match]]
             [clojure.set :refer [subset? difference]]))
 (def prefixes
-  "The set of valid variable prefixes."
-  #{\v \w})
+   "The set of valid variable prefixes."
+   #{\v \w})
 
-(def prefix
-  "Returns the supplied symbol's first character."
-  (comp first name))
+ (def prefix
+   "Returns the supplied symbol's first character."
+   (comp first name))
 
-;; Variable validation
+(defn cheap
+  "Generates a cheap variable using the supplied number."
+  [n]
+  (symbol (str \v n)))
 
+(defn expensive
+  "Generates an expensive variable using the supplied number."
+  [n]
+  (symbol (str \w n)))
 (def literals #{'T 'F})
-(def literal? (comp boolean literals))
-
-(defn variable? [x]
+(defn variable?
+  "Returns true if the argument is a valid cheap or expensive
+  variable, false otherwise."
+  [x]
   (and (symbol? x)
        (contains? prefixes (prefix x))))
 
-;; Variable Creation
-
-(defn cheap [n]
-  (symbol (str \v n)))
-
-(defn expensive [n]
-  (symbol (str \w n)))
-
-;; Expression Validation
-
+(def literal?
+  "Returns true if passed a literal, false otherwise."
+  (comp boolean literals))
 (defn unary? [exp]
   (and (coll? exp)
        (= 2 (count exp))))
@@ -43,7 +44,6 @@
 (def args
   "Returns the arguments of the supplied boolean expression."
   rest)
-
 (defn AND?
   "Returns true if the supplied expression is of the form
   (and <variable> <variable>), false otherwise."
@@ -52,7 +52,6 @@
        (= 'and (func exp))))
 
 (defn AND [a b] (list 'and a b))
-
 (defn OR?
   "Returns true if the supplied expression is of the form
   (or <variable> <variable>), false otherwise."
@@ -61,7 +60,6 @@
        (= 'or (func exp))))
 
 (defn OR [a b] (list 'or a b))
-
 (defn NOT?
   "Returns true if the supplied expression is of the form
   (not <variable>), false otherwise."
@@ -76,39 +74,10 @@
   (if (NOT? x)
     (first (args x))
     (list 'not x)))
-
 (def expr?
   "Returns true if the supplied expression is a valid boolean
   expression, false otherwise."
   (some-fn AND? OR? NOT?))
-
-;; ## Deep Checking
-
-(defn make-checker
-  "Takes a predicate that checks the leaves."
-  ([pred] (make-checker pred (fn [_] false)))
-  ([pred else]
-   (fn recurse [exp]
-     (boolean
-      (cond (or (pred exp) (literal? exp)) true
-            (expr? exp) (every? recurse (args exp))
-            :else (else exp))))))
-
-(def cheap?
-  "Returns true if the supplied expression contains only cheap
-  variables, false otherwise."
-  (make-checker
-   (fn [x]
-     (if (variable? x)
-       (= \v (prefix x))))))
-
-(def expensive?
-  "Returns true if the supplied expression is fully expensive, false
-  otherwise."
-  (complement cheap?))
-
-;; ## Binary Simplification
-
 (defn flatten-binary
   "Returns a function that takes a binary expression and flattens it
   down into a variadic version. Returns the arguments to the variadic
@@ -128,7 +97,6 @@
 
 (def flatten-and (flatten-binary AND?))
 (def flatten-or (flatten-binary OR?))
-
 (defn op->binary
   "Moves the `op` instances back into binary form. If no ops are
   provided, returns 'T."
@@ -138,7 +106,6 @@
 
 (def and->binary (op->binary AND))
 (def or->binary (op->binary OR))
-
 (defn combinations
   "Thanks to amalloy: https://gist.github.com/amalloy/1042047"
   [n coll]
@@ -173,7 +140,6 @@
          (reduce into #{})
          (difference exprs)
          (seq))))
-
 (defn simplify-binary
   "Returns a function that simplifies binary expressions.
 
@@ -200,7 +166,6 @@
          (->> (reduce absorb #{} xs)
               (absorption-law tear-fn)
               (zip-fn)))))))
-
 (def simplify-and
   "Returns a function that simplifies an AND expression. Returns an
   expression in conjunctive normal form."
@@ -228,14 +193,6 @@
    (for [l (flatten-and l)
          r (flatten-and r)]
      (simplify-or* l r))))
-
-;; Note: The basic algorithm is here:
-;; http://www.cs.jhu.edu/~jason/tutorials/convert-to-CNF.html
-;;
-;; NOTE: We still have a couple of simplifications we could implement
-;; from here: http://www.nayuki.io/page/boolean-algebra-laws no name
-;; and consensus.
-
 (defn simplify
   "returns a simplified expression in conjunctive normal
   form."
@@ -259,7 +216,31 @@
 
          ;; Returns constants and literals.
          :else exp))
+(defn make-checker
+  "Takes a predicate that checks the leaves."
+  ([pred] (make-checker pred (fn [_] false)))
+  ([pred else]
+   (fn recurse [exp]
+     (boolean
+      (cond (or (pred exp) (literal? exp)) true
+            (expr? exp) (every? recurse (args exp))
+            :else (else exp))))))
 
+(def cheap?
+  "Returns true if the supplied expression contains only cheap
+  variables, false otherwise."
+  (make-checker
+   (fn [x]
+     (if (variable? x)
+       (= \v (prefix x))))))
+
+(def expensive?
+  "Returns true if the supplied expression is fully expensive, false
+  otherwise."
+  (complement cheap?))
+(defn pushdown-only [exp]
+  (and->binary
+   (filter cheap? (flatten-and (simplify exp)))))
 (def separate (juxt filter remove))
 
 (defn factor
@@ -292,10 +273,6 @@
                          [factored]))))))))]
     (factor*
      (flatten-and cnf-exp))))
-
-(defn pushdown-only [exp]
-  (and->binary
-   (filter cheap? (flatten-and (simplify exp)))))
 
 (def pushdown
   (comp factor pushdown-only))
